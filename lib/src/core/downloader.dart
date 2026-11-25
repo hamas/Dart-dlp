@@ -56,12 +56,14 @@ class HamasDownloader {
     }
 
     if (bodyLength <= 0) {
+      print('[HamasDownloader] Warning: Could not determine content length.');
       // Direct Download Fallback
       await _downloadSingle(url, raf, headers: headers);
       await raf.close();
-      _progressController.close();
+      unawaited(_progressController.close());
       return;
     }
+    print('[HamasDownloader] Starting chunked download: $bodyLength bytes');
 
     // 2. Calculate Chunk Sizes
     final totalLength = bodyLength;
@@ -76,7 +78,7 @@ class HamasDownloader {
       var end = (i + 1) * chunkSize - 1;
       if (end >= totalLength) end = totalLength - 1;
 
-      futures.add(_downloadChunk(url, start, end, raf, (bytes) {
+      futures.add(_downloadChunk(url, start, end, savePath, (bytes) {
         receivedBytes += bytes;
       }, headers: headers));
     }
@@ -103,56 +105,35 @@ class HamasDownloader {
     } finally {
       timer.cancel();
       await raf.close();
-      _progressController.close();
+      unawaited(_progressController.close());
     }
   }
 
-  Future<void> _downloadChunk(String url, int start, int end,
-      RandomAccessFile raf, Function(int) onBytes,
+  Future<void> _downloadChunk(
+      String url, int start, int end, String savePath, Function(int) onBytes,
       {Map<String, String>? headers}) async {
-    final request = http.Request('GET', Uri.parse(url));
-    if (headers != null) request.headers.addAll(headers);
-    request.headers['Range'] = 'bytes=$start-$end';
-
-    final response = await request.send();
-    if (response.statusCode != 200 && response.statusCode != 206) {
-      throw Exception(
-          'Failed to download chunk from $url: ${response.statusCode}');
-    }
-
-    // int offset = start; // Unused
-    await response.stream.forEach((chunk) {
-      // Locking might be needed for very high concurrency on some file systems,
-      // but RandomAccessFile.setPositionSync is usually safe per handle if careful.
-      // However, sharing one RAF across isolates/futures requires caution.
-      // For simple Futures in same Isolate, sequential sync writing is safest.
-      // Optimally, each chunk could write to a temp file and merge, but seeking is faster.
-
-      // Since we are in the same isolate, we just need to ensure we write to the correct offset.
-      // Note: RAF is stateful (position). We must set position before EVERY write in a concurrent setup.
-      // Race condition danger: If two futures set position then write, they might overwrite.
-      // Fix: Use separate RAF handles or synchronized access.
-      // For this implementation, we will assume a simple lock or rely on OS buffering.
-      // BETTER APPROACH for Dart single-isolate concurrency:
-      // Actually, standard `await` yields. We cannot share one RAF safely without locking mechanism.
-      // Simplified approach: Open a NEW RAF handle for each chunk to ensure thread-safety (OS file handle independent position).
-    });
-
-    // Re-implementation with separate RAF for safety:
-    final chunkFile = await File(raf.path).open(mode: FileMode.write);
+    // Open a separate handle for each chunk to avoid stateful races on setPosition
+    // and use FileMode.append to avoid truncation.
+    final chunkFile = await File(savePath).open(mode: FileMode.append);
     try {
-      final chunkRequest = http.Request('GET', Uri.parse(url));
-      if (headers != null) chunkRequest.headers.addAll(headers);
-      chunkRequest.headers['Range'] = 'bytes=$start-$end';
-      final chunkResponse = await chunkRequest.send();
+      final request = http.Request('GET', Uri.parse(url));
+      if (headers != null) request.headers.addAll(headers);
+      request.headers['Range'] = 'bytes=$start-$end';
+      final response = await request.send();
+
+      if (response.statusCode != 206 && response.statusCode != 200) {
+        throw Exception('Chunk failed: ${response.statusCode}');
+      }
 
       int currentPos = start;
-      await chunkResponse.stream.listen((data) async {
-        chunkFile.setPositionSync(currentPos);
-        chunkFile.writeFromSync(data);
+      await for (final data in response.stream) {
+        // Even with separate handles, some OSes might be picky,
+        // but FileMode.append handle usually has its own seek pointer.
+        await chunkFile.setPosition(currentPos);
+        await chunkFile.writeFrom(data);
         currentPos += data.length;
         onBytes(data.length);
-      }).asFuture();
+      }
     } finally {
       await chunkFile.close();
     }
@@ -160,10 +141,17 @@ class HamasDownloader {
 
   Future<void> _downloadSingle(String url, RandomAccessFile raf,
       {Map<String, String>? headers}) async {
-    // Implementation for non-chunked fallback
+    print('[HamasDownloader] Initiating single-stream download...');
     final request = http.Request('GET', Uri.parse(url));
     if (headers != null) request.headers.addAll(headers);
     final response = await request.send();
+
+    if (response.statusCode != 200 && response.statusCode != 206) {
+      print(
+          '[HamasDownloader] Error: GET failed with status ${response.statusCode}');
+      return;
+    }
+
     int total = response.contentLength ?? 0;
     int received = 0;
     final startTime = DateTime.now();
@@ -173,6 +161,8 @@ class HamasDownloader {
       received += data.length;
       if (total > 0) _reportProgress(received, total, startTime);
     }).asFuture();
+    print(
+        '[HamasDownloader] Single-stream download finished. Received $received bytes.');
   }
 
   void _reportProgress(int received, int total, DateTime startTime) {

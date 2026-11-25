@@ -4,12 +4,13 @@ version: 1.0.0
 repository: https://github.com/hamas/dart_dlp
 
 environment:
-  sdk: '>=3.3.0 <4.0.0'
+  sdk: '>=3.11.0 <4.0.0'
 
 dependencies:
   http: ^1.1.0
   html: ^0.15.4
   args: ^2.4.2
+  parsejs_null_safety: ^2.0.4
   flutter:
     sdk: flutter
 
@@ -24,5 +25,5 @@ flutter:
 
 
 dev_dependencies:
-  lints: ^3.0.0
+  lints: ^6.1.0
   test: ^1.24.0

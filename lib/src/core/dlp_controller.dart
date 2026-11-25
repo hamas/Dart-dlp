@@ -84,8 +84,8 @@ class DlpController {
               videoPath: vPath, audioPath: aPath, outputPath: finalPath);
 
           // 5. Cleanup
-          _tryDelete(vPath);
-          _tryDelete(aPath);
+          unawaited(_tryDelete(vPath));
+          unawaited(_tryDelete(aPath));
 
           _updateState(DlpStatus.completed, 'Finished: $finalPath');
           return finalPath;
